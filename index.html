@@ -952,57 +952,57 @@ function cacheSet(fipeCode, rate) {
 
    Returns: { rate: number, fromCache: bool, usedFallback: bool }
 ═══════════════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════════════
+   HISTORICAL RATE RESOLVER (VIA BRASIL API)
+   ───────────────────────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════════
+   HISTORICAL RATE RESOLVER (VIA PARALLELUM V2 NATIVA)
+   ───────────────────────────────────────────────────────────────────────── */
 async function resolveRateReal(tipo, marcaCod, modeloCod, anoCod, fipeCode, fallbackRate, onStep) {
-
-  /* ── 1. Cache hit ── */
+  /* ── 1. Cache hit (Buscando no localStorage da máquina) ── */
   const cached = cacheGet(fipeCode);
   if (cached !== null) {
     onStep(3, 3);
     return { rate: cached, fromCache: true, usedFallback: false };
   }
 
-  /* ── 2. No proxy configured → skip to fallback immediately ── */
-  if (!PROXY_URL) {
-    onStep(3, 3);
-    return { rate: fallbackRate, fromCache: false, usedFallback: true };
-  }
-
   try {
-    /* ── 3. Fetch reference months list via proxy ── */
+    /* ── 2. Conversão da Rota para Padrão V2 (Inglês) ── */
+    const v2Tipo = tipo === 'carros' ? 'cars' : tipo === 'motos' ? 'motorcycles' : 'trucks';
+
+    /* ── 3. Descobrindo os Códigos dos Meses (Referências) ── */
     onStep(1, 3);
-    const refs = await fetchWithTimeout(`${PROXY_URL}/api/referencias`).then(r => r.json());
-    if (!Array.isArray(refs) || refs.length < 25) throw new Error('refs_too_short');
+    const refs = await fetchWithTimeout('https://fipe.parallelum.com.br/api/v2/references').then(r => r.json());
+    if (!Array.isArray(refs) || refs.length < 25) throw new Error('referências_insuficientes');
 
-    // refs[0] = current month, refs[12] = 12 months ago, refs[24] = 24 months ago
-    const tabelaAtual = refs[0].Codigo;
-    const tabela12    = refs[12].Codigo;
-    const tabela24    = refs[24].Codigo;
+    const refAtual = refs[0].code;
+    const ref12    = refs[12].code;
+    const ref24    = refs[24].code;
 
-    /* ── 4. Parallel fetch of 3 price snapshots via proxy ── */
+    /* ── 4. Consultando Preços Históricos (Hoje, -12m e -24m) ── */
     onStep(2, 3);
-
-    // Build proxy URL for one reference period
-    const precoUrl = (tabela) =>
-      `${PROXY_URL}/api/preco?tipo=${encodeURIComponent(tipo)}&marca=${encodeURIComponent(marcaCod)}&modelo=${encodeURIComponent(modeloCod)}&ano=${encodeURIComponent(anoCod)}&tabela=${encodeURIComponent(tabela)}`;
+    const urlPreco = (ref) => 
+      `https://fipe.parallelum.com.br/api/v2/${v2Tipo}/brands/${marcaCod}/models/${modeloCod}/years/${anoCod}?reference=${ref}`;
 
     const results = await Promise.allSettled([
-      fetchWithTimeout(precoUrl(tabelaAtual)).then(r => r.json()),  // v0  (now)
-      fetchWithTimeout(precoUrl(tabela12)).then(r => r.json()),     // v12 (12m ago)
-      fetchWithTimeout(precoUrl(tabela24)).then(r => r.json()),     // v24 (24m ago)
+      fetchWithTimeout(urlPreco(refAtual)).then(r => r.json()),
+      fetchWithTimeout(urlPreco(ref12)).then(r => r.json()),
+      fetchWithTimeout(urlPreco(ref24)).then(r => r.json())
     ]);
 
-    // Extract valid numeric prices; null = failed or unparseable
+    // Extrai e limpa os valores. A v2 retorna data.price = "R$ 61.899,00"
     const [v0, v12, v24] = results.map(r => {
-      if (r.status !== 'fulfilled') return null;
-      const v = parsePrice(r.value?.Valor);
+      // Se a FIPE não encontrar o carro naquele ano antigo, ignoramos o erro
+      if (r.status !== 'fulfilled' || !r.value?.price) return null; 
+      const v = parsePrice(r.value.price);
       return (v && v > 0) ? v : null;
     });
 
-    /* ── 5. Compute average annual depreciation rate ── */
+    /* ── 5. Calculando a Regressão do Fator de Desvalorização ── */
     if (v0 && v12 && v24) {
-      // Both years available: average the two annual drop rates
-      const r1     = (v24 - v12) / v24;   // drop in year 2→1 ago
-      const r2     = (v12 - v0)  / v12;   // drop in year 1→now
+      // Temos os 3 pontos: Média real de 24 meses
+      const r1     = (v24 - v12) / v24;   
+      const r2     = (v12 - v0)  / v12;   
       const rMedio = (r1 + r2) / 2;
       const rate   = Math.min(Math.max(rMedio, 0.01), 0.40);
       onStep(3, 3);
@@ -1011,14 +1011,15 @@ async function resolveRateReal(tipo, marcaCod, modeloCod, anoCod, fipeCode, fall
     }
 
     if (v0 && v12) {
-      // Only 1 year of data: use single-period rate
+      // Carro recente (só tem 1 ano de mercado)
       const rate = Math.min(Math.max((v12 - v0) / v12, 0.01), 0.40);
       onStep(3, 3);
       cacheSet(fipeCode, rate);
       return { rate, fromCache: false, usedFallback: false };
     }
 
-    throw new Error('insufficient_price_data');
+    // Se chegar aqui, o carro é Zero KM ou recém-lançado e não tem histórico suficiente
+    throw new Error('veículo sem tempo de mercado para cálculo');
 
   } catch (err) {
     console.warn('[AutoValor] Historical rate fetch failed, using fallback:', err.message);
