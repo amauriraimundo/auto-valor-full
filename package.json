@@ -1,0 +1,15 @@
+{
+  "name": "autovalor-proxy",
+  "version": "1.0.0",
+  "description": "FIPE historical data proxy for AutoValor — bypasses CORS on veiculos.fipe.org.br",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["fipe", "proxy", "autovalor"],
+  "license": "MIT"
+}
